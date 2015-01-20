@@ -14,28 +14,37 @@ class DbHttpSession extends CDbHttpSession
     public function regenerateID($deleteOldSession = false)
     {
         $oldID = session_id();
-        session_regenerate_id($deleteOldSession);
+
+        // if no session is started, there is nothing to regenerate
+        if (empty($oldID)) {
+            return;
+        }
+
+        if ($this->getIsStarted()) {
+            session_regenerate_id(false);
+        }
+
         $newID = session_id();
         $db = $this->getDbConnection();
 
-        $sql = "SELECT ID,EXPIRE,DATA FROM {$this->sessionTableName} WHERE id=:id";
-        $row = $db->createCommand($sql)->bindValue(':id', $oldID)->queryRow();
+        $row = $db->createCommand("SELECT ID,EXPIRE,DATA FROM {$this->sessionTableName} WHERE id=:id")
+            ->bindValue(':id', $oldID)->queryRow();
 
         if ($row !== false) {
             if ($deleteOldSession) {
-                $sql = "UPDATE {$this->sessionTableName} SET id=:newID WHERE id=:oldID";
-                $db->createCommand($sql)->bindValue(':newID', $newID)->bindValue(':oldID', $oldID)->execute();
+                $db->createCommand("UPDATE {$this->sessionTableName} SET id=:newID WHERE id=:oldID")
+                    ->bindValue(':newID', $newID)
+                    ->bindValue(':oldID', $oldID)
+                    ->execute();
             } else {
-                $sql = "INSERT INTO {$this->sessionTableName} (id, expire,data)
-                      VALUES (:id, :expire, empty_blob()) returning data into :data";
-
                 $fp = fopen('php://memory', "rwb");
                 $transaction = $db->beginTransaction();
 
                 fwrite($fp, stream_get_contents($row['DATA']));
                 fseek($fp, 0);
 
-                $db->createCommand($sql)
+                $db->createCommand("INSERT INTO {$this->sessionTableName} (id, expire,data)
+                      VALUES (:id, :expire, empty_blob()) returning data into :data")
                     ->bindValue(':id', $newID)
                     ->bindValue(':expire', $row['EXPIRE'])
                     ->bindParam(':data', $fp, PDO::PARAM_LOB)
@@ -76,11 +85,11 @@ class DbHttpSession extends CDbHttpSession
      */
     public function readSession($id)
     {
-
-        $now = time();
-        $sql = "SELECT data FROM {$this->sessionTableName} WHERE expire>:expire AND id=:id";
-        $data = $this->getDbConnection()->createCommand($sql)->bindValue(':id', $id)->bindValue(':expire',
-            $now)->queryRow();
+        $data = $this->getDbConnection()
+            ->createCommand("SELECT data FROM {$this->sessionTableName} WHERE expire>:expire AND id=:id")
+            ->bindValue(':id', $id)
+            ->bindValue(':expire', time())
+            ->queryRow();
         return $data === false ? '' : stream_get_contents($data['DATA']);
     }
 
@@ -116,7 +125,7 @@ class DbHttpSession extends CDbHttpSession
             fclose($fp);
         } catch (Exception $e) {
             if (YII_DEBUG) {
-                //throw $e;
+                echo $e->getMessage();
             }
             // it is too late to log an error message here
             return false;

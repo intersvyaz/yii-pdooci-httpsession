@@ -69,7 +69,7 @@ class DbHttpSession extends CDbHttpSession
     protected function createSessionTable($db, $tableName)
     {
         $sql = 'CREATE
-           TABLE YiiSession
+           TABLE ' . $this->sessionTableName . '
            (
               "ID"     VARCHAR2(32 BYTE),
               "EXPIRE" NUMBER(10,0) NOT NULL,

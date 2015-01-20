@@ -8,13 +8,8 @@ use PDO;
 
 class DbHttpSession extends CDbHttpSession
 {
-    public $autoCreateSessionTable = false;
-
     /**
-     * Updates the current session id with a newly generated one .
-     * Please refer to {@link http://php.net/session_regenerate_id} for more details.
-     * @param boolean $deleteOldSession Whether to delete the old associated session file or not.
-     * @since 1.1.8
+     * @inheritdoc
      */
     public function regenerateID($deleteOldSession = false)
     {
@@ -31,7 +26,8 @@ class DbHttpSession extends CDbHttpSession
                 $sql = "UPDATE {$this->sessionTableName} SET id=:newID WHERE id=:oldID";
                 $db->createCommand($sql)->bindValue(':newID', $newID)->bindValue(':oldID', $oldID)->execute();
             } else {
-                $sql = "INSERT INTO {$this->sessionTableName} (id, expire,data) VALUES (:id, :expire, empty_blob()) returning data into :data";
+                $sql = "INSERT INTO {$this->sessionTableName} (id, expire,data)
+                      VALUES (:id, :expire, empty_blob()) returning data into :data";
 
                 $fp = fopen('php://memory', "rwb");
                 $transaction = $db->beginTransaction();
@@ -50,38 +46,33 @@ class DbHttpSession extends CDbHttpSession
             }
         } else {
             // shouldn't reach here normally
-            $db->createCommand("INSERT INTO {$this->sessionTableName} (id, expire) values (:ID, :EXPIRE)")->execute(array(
-                'ID' => $newID,
-                'EXPIRE' => time() + $this->getTimeout(),
-            ));
+            $db->createCommand("INSERT INTO {$this->sessionTableName} (id, expire) values (:ID, :EXPIRE)")
+                ->execute(array(
+                    'ID' => $newID,
+                    'EXPIRE' => time() + $this->getTimeout(),
+                ));
         }
     }
 
     /**
-     * Creates the session DB table.
-     * @param \CDbConnection $db the database connection
-     * @param string $tableName the name of the table to be created
+     * @inheritdoc
      */
     protected function createSessionTable($db, $tableName)
     {
-        $sql = '
-CREATE
-   TABLE YiiSession
-   (
-      "ID"     VARCHAR2(32 BYTE),
-      "EXPIRE" NUMBER(10,0) NOT NULL,
-      "DATA" BLOB,
-       CONSTRAINT YiiSession_PK PRIMARY KEY(ID)
-   );
-';
-        $db->createCommand($sql)->execute();
+        $sql = 'CREATE
+           TABLE YiiSession
+           (
+              "ID"     VARCHAR2(32 BYTE),
+              "EXPIRE" NUMBER(10,0) NOT NULL,
+              "DATA" BLOB,
+               CONSTRAINT YiiSession_PK PRIMARY KEY(ID)
+           );';
+        $db->createCommand($sql)
+            ->execute();
     }
 
     /**
-     * Session read handler.
-     * Do not call this method directly.
-     * @param string $id session ID
-     * @return string the session data
+     * @inheritdoc
      */
     public function readSession($id)
     {
@@ -94,11 +85,7 @@ CREATE
     }
 
     /**
-     * Session write handler.
-     * Do not call this method directly.
-     * @param string $id session ID
-     * @param string $data session data
-     * @return boolean whether session write is successful
+     * @inheritdoc
      */
     public function writeSession($id, $data)
     {
@@ -109,9 +96,11 @@ CREATE
             $db = $this->getDbConnection();
             $sql = "SELECT id FROM {$this->sessionTableName} WHERE id=:id";
             if ($db->createCommand($sql)->bindValue(':id', $id)->queryScalar() === false) {
-                $sql = "INSERT INTO {$this->sessionTableName} (id, expire,data) VALUES (:id, :expire, empty_blob()) returning data into :data";
+                $sql = "INSERT INTO {$this->sessionTableName} (id, expire,data)
+                    VALUES (:id, :expire, empty_blob()) returning data into :data";
             } else {
-                $sql = "UPDATE {$this->sessionTableName} SET data=empty_blob(), expire=:expire WHERE id=:id returning data into :data";
+                $sql = "UPDATE {$this->sessionTableName} SET data=empty_blob(), expire=:expire
+                    WHERE id=:id returning data into :data";
             }
 
             $fp = fopen('php://memory', "rwb");

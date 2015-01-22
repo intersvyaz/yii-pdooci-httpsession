@@ -11,6 +11,16 @@ class DbHttpSession extends CDbHttpSession
     /**
      * @inheritdoc
      */
+    public function init()
+    {
+        // Opening db connection first
+        $this->getDbConnection()->setActive(true);
+        parent::init();
+    }
+
+    /**
+     * @inheritdoc
+     */
     public function regenerateID($deleteOldSession = false)
     {
         $oldID = session_id();

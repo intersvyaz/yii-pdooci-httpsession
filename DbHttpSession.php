@@ -5,6 +5,7 @@ namespace Intersvyaz\HttpSession;
 use CDbHttpSession;
 use Exception;
 use PDO;
+use Intersvyaz\Pdo\Oci8;
 
 class DbHttpSession extends CDbHttpSession
 {
@@ -47,11 +48,14 @@ class DbHttpSession extends CDbHttpSession
                     ->bindValue(':oldID', $oldID)
                     ->execute();
             } else {
-                $fp = fopen('php://memory', "rwb");
-                $transaction = $db->beginTransaction();
-
-                fwrite($fp, stream_get_contents($row['DATA']));
-                fseek($fp, 0);
+                if ($this->isOci8Driver()) {
+                    $fp = $row['DATA'];
+                } else {
+                    $fp = fopen('php://memory', "rwb");
+                    fwrite($fp, stream_get_contents($row['DATA']));
+                    fseek($fp, 0);
+                    $transaction = $db->beginTransaction();
+                }
 
                 $db->createCommand("INSERT INTO {$this->sessionTableName} (id, expire,data)
                       VALUES (:id, :expire, empty_blob()) returning data into :data")
@@ -60,8 +64,10 @@ class DbHttpSession extends CDbHttpSession
                     ->bindParam(':data', $fp, PDO::PARAM_LOB)
                     ->execute();
 
-                $transaction->commit();
-                fclose($fp);
+                if (!$this->isOci8Driver()) {
+                    $transaction->commit();
+                    fclose($fp);
+                }
             }
         } else {
             // shouldn't reach here normally
@@ -100,6 +106,11 @@ class DbHttpSession extends CDbHttpSession
             ->bindValue(':id', $id)
             ->bindValue(':expire', time())
             ->queryRow();
+
+        if ($this->isOci8Driver()) {
+            return $data['DATA'];
+        }
+
         return $data === false ? '' : stream_get_contents($data['DATA']);
     }
 
@@ -122,17 +133,25 @@ class DbHttpSession extends CDbHttpSession
                     WHERE id=:id returning data into :data";
             }
 
-            $fp = fopen('php://memory', "rwb");
-            $transaction = $db->beginTransaction();
-            fwrite($fp, $data);
-            fseek($fp, 0);
+            if ($this->isOci8Driver()) {
+                $fp = $data;
+            } else {
+                $fp = fopen('php://memory', "rwb");
+                fwrite($fp, $data);
+                fseek($fp, 0);
+                $transaction = $db->beginTransaction();
+            }
+
             $db->createCommand($sql)
                 ->bindValue(':id', $id)
                 ->bindValue(':expire', $expire)
                 ->bindParam(':data', $fp, PDO::PARAM_LOB)
                 ->execute();
-            $transaction->commit();
-            fclose($fp);
+
+            if (!$this->isOci8Driver()) {
+                $transaction->commit();
+                fclose($fp);
+            }
         } catch (Exception $e) {
             if (YII_DEBUG) {
                 echo $e->getMessage();
@@ -141,5 +160,14 @@ class DbHttpSession extends CDbHttpSession
             return false;
         }
         return true;
+    }
+
+    /**
+     * @return bool
+     * @throws \CDbException
+     */
+    protected function isOci8Driver()
+    {
+        return $this->getDbConnection()->pdoClass == Oci8::class;
     }
 }

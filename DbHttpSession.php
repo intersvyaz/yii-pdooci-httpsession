@@ -32,7 +32,7 @@ class DbHttpSession extends CDbHttpSession
         }
 
         if ($this->getIsStarted()) {
-            session_regenerate_id(false);
+            session_regenerate_id($deleteOldSession);
         }
 
         $newID = session_id();
@@ -108,7 +108,7 @@ class DbHttpSession extends CDbHttpSession
             ->queryRow();
 
         if ($this->isOci8Driver()) {
-            return $data['DATA'];
+            return (string)$data['DATA'];
         }
 
         return $data === false ? '' : stream_get_contents($data['DATA']);

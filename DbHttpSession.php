@@ -10,6 +10,23 @@ use Intersvyaz\Pdo\Oci8;
 class DbHttpSession extends CDbHttpSession
 {
     /**
+     * Initial state of the session (when it was open).
+     * @var string
+     */
+    protected $initData;
+
+    /**
+     * Exclusive access to the session.
+     * @var bool
+     */
+    protected $exclusive;
+
+    /**
+     * @var CDbTransaction
+     */
+    private $transaction;
+
+    /**
      * @inheritdoc
      */
     public function init()
@@ -17,6 +34,14 @@ class DbHttpSession extends CDbHttpSession
         // Opening db connection first
         $this->getDbConnection()->setActive(true);
         parent::init();
+    }
+
+    /**
+     * @param bool $status
+     */
+    public function setExclusive($status)
+    {
+        $this->exclusive = (bool)$status;
     }
 
     /**
@@ -82,18 +107,10 @@ class DbHttpSession extends CDbHttpSession
     /**
      * @inheritdoc
      */
-    protected function createSessionTable($db, $tableName)
+    public function openSession($savePath, $sessionName)
     {
-        $sql = 'CREATE
-           TABLE ' . $this->sessionTableName . '
-           (
-              "ID"     VARCHAR2(32 BYTE),
-              "EXPIRE" NUMBER(10,0) NOT NULL,
-              "DATA" BLOB,
-               CONSTRAINT YiiSession_PK PRIMARY KEY(ID)
-           );';
-        $db->createCommand($sql)
-            ->execute();
+        $this->initData = null;
+        return parent::openSession($savePath, $sessionName);
     }
 
     /**
@@ -101,17 +118,13 @@ class DbHttpSession extends CDbHttpSession
      */
     public function readSession($id)
     {
-        $data = $this->getDbConnection()
-            ->createCommand("SELECT data FROM {$this->sessionTableName} WHERE expire>:expire AND id=:id")
-            ->bindValue(':id', $id)
-            ->bindValue(':expire', time())
-            ->queryRow();
+        $data = $this->getSessionData($id, $this->exclusive);
 
-        if ($this->isOci8Driver()) {
-            return (string)$data['DATA'];
+        if ($this->initData === null) {
+            $this->initData = $data;
         }
 
-        return $data === false ? '' : stream_get_contents($data['DATA']);
+        return $data;
     }
 
     /**
@@ -129,6 +142,8 @@ class DbHttpSession extends CDbHttpSession
                 $sql = "INSERT INTO {$this->sessionTableName} (id, expire,data)
                     VALUES (:id, :expire, empty_blob()) returning data into :data";
             } else {
+                $data = $this->getDataForSave($id, $data);
+
                 $sql = "UPDATE {$this->sessionTableName} SET data=empty_blob(), expire=:expire
                     WHERE id=:id returning data into :data";
             }
@@ -139,7 +154,10 @@ class DbHttpSession extends CDbHttpSession
                 $fp = fopen('php://memory', "rwb");
                 fwrite($fp, $data);
                 fseek($fp, 0);
-                $transaction = $db->beginTransaction();
+
+                if (!$this->transaction) {
+                    $this->transaction = $this->getDbConnection()->beginTransaction();
+                }
             }
 
             $db->createCommand($sql)
@@ -149,17 +167,97 @@ class DbHttpSession extends CDbHttpSession
                 ->execute();
 
             if (!$this->isOci8Driver()) {
-                $transaction->commit();
                 fclose($fp);
+            }
+
+            if ($this->transaction) {
+                $this->transaction->commit();
+                $this->transaction = null;
             }
         } catch (Exception $e) {
             if (YII_DEBUG) {
                 echo $e->getMessage();
             }
+
+            if ($this->transaction) {
+                $this->transaction->rollback();
+                $this->transaction = null;
+            }
+
             // it is too late to log an error message here
             return false;
         }
         return true;
+    }
+
+    /**
+     * @param string $id
+     * @param bool $forUpdate
+     * @return bool|string
+     * @throws \CDbException
+     * @throws \CException
+     */
+    protected function getSessionData($id, $forUpdate = false)
+    {
+        if ($forUpdate && !$this->transaction) {
+            $this->transaction = $this->getDbConnection()->beginTransaction();
+        }
+
+        $data = $this->getDbConnection()
+            ->createCommand("SELECT data FROM {$this->sessionTableName} WHERE expire>:expire AND id=:id" .
+                ($forUpdate ? ' FOR UPDATE' : '')
+            )
+            ->bindValue(':id', $id)
+            ->bindValue(':expire', time())
+            ->queryRow();
+
+        if ($this->isOci8Driver()) {
+            return (string)$data['DATA'];
+        }
+
+        return $data === false ? '' : stream_get_contents($data['DATA']);
+    }
+
+    /**
+     * Get the current state of the session from the database,
+     * replacing only the fields which were modified during execution.
+     * @param string $id
+     * @param string $data
+     * @throws \CDbException
+     * @throws \CException
+     */
+    protected function getDataForSave($id, $data)
+    {
+        // Get the initial state of the session (when it was open).
+        @session_decode($this->initData);
+        $initData = $_SESSION;
+
+        // Get the final state of the session (when writeSession() was called).
+        @session_decode($data);
+        $finalSessionData = $_SESSION;
+
+        // Get the session state from the database with the lock (SELECT FOR UPDATE).
+        @session_decode($this->getSessionData($id, true));
+
+        $_SESSION = array_merge($_SESSION, array_diff($finalSessionData, $initData));
+        return @session_encode();
+    }
+
+    /**
+     * @inheritdoc
+     */
+    protected function createSessionTable($db, $tableName)
+    {
+        $sql = 'CREATE
+           TABLE ' . $this->sessionTableName . '
+           (
+              "ID"     VARCHAR2(32 BYTE),
+              "EXPIRE" NUMBER(10,0) NOT NULL,
+              "DATA" BLOB,
+               CONSTRAINT YiiSession_PK PRIMARY KEY(ID)
+           );';
+        $db->createCommand($sql)
+            ->execute();
     }
 
     /**

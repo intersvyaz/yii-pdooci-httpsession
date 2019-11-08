@@ -13,7 +13,7 @@ class DbHttpSession extends CDbHttpSession
      * Initial state of the session (when it was open).
      * @var string
      */
-    protected $initData;
+    protected $initSessionData;
 
     /**
      * Exclusive access to the session.
@@ -109,7 +109,7 @@ class DbHttpSession extends CDbHttpSession
      */
     public function openSession($savePath, $sessionName)
     {
-        $this->initData = null;
+        $this->initSessionData = null;
         return parent::openSession($savePath, $sessionName);
     }
 
@@ -120,8 +120,8 @@ class DbHttpSession extends CDbHttpSession
     {
         $data = $this->getSessionData($id, $this->exclusive);
 
-        if ($this->initData === null) {
-            $this->initData = $data;
+        if ($this->initSessionData === null) {
+            $this->initSessionData = $data;
         }
 
         return $data;
@@ -229,17 +229,24 @@ class DbHttpSession extends CDbHttpSession
     protected function getDataForSave($id, $data)
     {
         // Get the initial state of the session (when it was open).
-        @session_decode($this->initData);
-        $initData = $_SESSION;
+        $_SESSION = [];
+        @session_decode($this->initSessionData);
+        $initSessionData = $_SESSION;
 
         // Get the final state of the session (when writeSession() was called).
+        $_SESSION = [];
         @session_decode($data);
         $finalSessionData = $_SESSION;
 
         // Get the session state from the database with the lock (SELECT FOR UPDATE).
+        $_SESSION = [];
         @session_decode($this->getSessionData($id, true));
+        $dbSessionData = $_SESSION;
 
-        $_SESSION = array_merge($_SESSION, array_diff($finalSessionData, $initData));
+        $sessionChanges = ArrayHelper::arrayRecursiveDiff($finalSessionData, $initSessionData);
+        $merged = ArrayHelper::merge($dbSessionData, $sessionChanges);
+        $_SESSION = ArrayHelper::arrayRemovedRecursiveDiff($merged, $initSessionData, $finalSessionData);
+
         return @session_encode();
     }
 

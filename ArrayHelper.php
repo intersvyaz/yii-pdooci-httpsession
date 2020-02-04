@@ -50,7 +50,7 @@ class ArrayHelper
         $result = $a;
 
         foreach ($b as $key => $value) {
-            if (is_array($value)) {
+            if (is_array($value) && array_key_exists($key, $c)) {
                 if (array_key_exists($key, $result)) {
                     $result[$key] = self::arrayRemovedRecursiveDiff($result[$key], $value, $c[$key]);
                 }

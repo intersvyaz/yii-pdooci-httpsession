@@ -7,6 +7,12 @@ use Exception;
 use PDO;
 use Intersvyaz\Pdo\Oci8;
 
+/**
+ * {@inheritDoc}
+ * Расширение для корректной работы с ораклом, плюс добавление других фич, а именно блокировка строк на уровне базы
+ * для исключения гонки при обновлениях. Используется в дальнейшем в другом расширении -
+ * Intersvyaz\Oauth2client\OauthEventHandler
+ */
 class DbHttpSession extends CDbHttpSession
 {
     /**
@@ -49,10 +55,15 @@ class DbHttpSession extends CDbHttpSession
      */
     public function regenerateID($deleteOldSession = false)
     {
-        $oldID = session_id();
+        if (!$this->isOci8Driver()) {
+            parent::regenerateID($deleteOldSession);
+            return;
+        }
+
+        $oldId = session_id();
 
         // if no session is started, there is nothing to regenerate
-        if (empty($oldID)) {
+        if (empty($oldId)) {
             return;
         }
 
@@ -60,17 +71,17 @@ class DbHttpSession extends CDbHttpSession
             session_regenerate_id($deleteOldSession);
         }
 
-        $newID = session_id();
+        $newId = session_id();
         $db = $this->getDbConnection();
 
-        $row = $db->createCommand("SELECT ID,EXPIRE,DATA FROM {$this->sessionTableName} WHERE id=:id")
-            ->bindValue(':id', $oldID)->queryRow();
+        $row = $db->createCommand("SELECT id, expire, data FROM {$this->sessionTableName} WHERE id = :id")
+            ->bindValue(':id', $oldId)->queryRow();
 
         if ($row !== false) {
             if ($deleteOldSession) {
-                $db->createCommand("UPDATE {$this->sessionTableName} SET id=:newID WHERE id=:oldID")
-                    ->bindValue(':newID', $newID)
-                    ->bindValue(':oldID', $oldID)
+                $db->createCommand("UPDATE {$this->sessionTableName} SET id = :newId WHERE id = :oldId")
+                    ->bindValue(':newId', $newId)
+                    ->bindValue(':oldId', $oldId)
                     ->execute();
             } else {
                 if ($this->isOci8Driver()) {
@@ -82,9 +93,11 @@ class DbHttpSession extends CDbHttpSession
                     $transaction = $db->beginTransaction();
                 }
 
-                $db->createCommand("INSERT INTO {$this->sessionTableName} (id, expire,data)
-                      VALUES (:id, :expire, empty_blob()) returning data into :data")
-                    ->bindValue(':id', $newID)
+                $db->createCommand(
+                    "INSERT INTO {$this->sessionTableName} (id, expire,data)
+                      VALUES (:id, :expire, empty_blob()) returning data into :data"
+                )
+                    ->bindValue(':id', $newId)
                     ->bindValue(':expire', $row['EXPIRE'])
                     ->bindParam(':data', $fp, PDO::PARAM_LOB)
                     ->execute();
@@ -96,10 +109,10 @@ class DbHttpSession extends CDbHttpSession
             }
         } else {
             // shouldn't reach here normally
-            $db->createCommand("INSERT INTO {$this->sessionTableName} (id, expire) values (:ID, :EXPIRE)")
+            $db->createCommand("INSERT INTO {$this->sessionTableName} (id, expire) values (:id, :expire)")
                 ->execute(array(
-                    'ID' => $newID,
-                    'EXPIRE' => time() + $this->getTimeout(),
+                    'id' => $newId,
+                    'expire' => time() + $this->getTimeout(),
                 ));
         }
     }
@@ -132,43 +145,35 @@ class DbHttpSession extends CDbHttpSession
      */
     public function writeSession($id, $data)
     {
+        if (!$this->isOci8Driver()) {
+            // Для всех не оракловых баз берем функционал из родительского метода
+            return parent::writeSession($id, $data);
+        }
+
         // exception must be caught in session write handler
         // http://us.php.net/manual/en/function.session-set-save-handler.php
         try {
             $expire = time() + $this->getTimeout();
             $db = $this->getDbConnection();
-            $sql = "SELECT id FROM {$this->sessionTableName} WHERE id=:id";
+
+            // Весь код, который тут был, нормально работает для Оракла, но криво работает для ПГ.
+            // Поэтому делаем его отдельно, а для остальных баз берем из родительского метода.
+            $sql = "SELECT id FROM {$this->sessionTableName} WHERE id = :id";
             if ($db->createCommand($sql)->bindValue(':id', $id)->queryScalar() === false) {
-                $sql = "INSERT INTO {$this->sessionTableName} (id, expire,data)
+                $sql = "INSERT INTO {$this->sessionTableName} (id, expire, data)
                     VALUES (:id, :expire, empty_blob()) returning data into :data";
             } else {
                 $data = $this->getDataForSave($id, $data);
 
-                $sql = "UPDATE {$this->sessionTableName} SET data=empty_blob(), expire=:expire
-                    WHERE id=:id returning data into :data";
-            }
-
-            if ($this->isOci8Driver()) {
-                $fp = $data;
-            } else {
-                $fp = fopen('php://memory', "rwb");
-                fwrite($fp, $data);
-                fseek($fp, 0);
-
-                if (!$this->transaction) {
-                    $this->transaction = $this->getDbConnection()->beginTransaction();
-                }
+                $sql = "UPDATE {$this->sessionTableName} SET data = empty_blob(), expire = :expire
+                    WHERE id = :id RETURNING data into :data";
             }
 
             $db->createCommand($sql)
                 ->bindValue(':id', $id)
                 ->bindValue(':expire', $expire)
-                ->bindParam(':data', $fp, PDO::PARAM_LOB)
+                ->bindParam(':data', $data, PDO::PARAM_LOB)
                 ->execute();
-
-            if (!$this->isOci8Driver()) {
-                fclose($fp);
-            }
 
             if ($this->transaction) {
                 $this->transaction->commit();
@@ -204,18 +209,20 @@ class DbHttpSession extends CDbHttpSession
         }
 
         $data = $this->getDbConnection()
-            ->createCommand("SELECT data FROM {$this->sessionTableName} WHERE expire>:expire AND id=:id" .
+            ->createCommand(
+                "SELECT data FROM {$this->sessionTableName} 
+            WHERE expire > :expire AND id = :id" .
                 ($forUpdate ? ' FOR UPDATE' : '')
             )
             ->bindValue(':id', $id)
             ->bindValue(':expire', time())
-            ->queryRow();
+            ->queryScalar();
 
         if ($this->isOci8Driver()) {
-            return (string)$data['DATA'];
+            return (string)$data;
         }
 
-        return $data === false ? '' : stream_get_contents($data['DATA']);
+        return $data === false ? '' : $data;
     }
 
     /**
@@ -255,16 +262,16 @@ class DbHttpSession extends CDbHttpSession
      */
     protected function createSessionTable($db, $tableName)
     {
-        $sql = 'CREATE
-           TABLE ' . $this->sessionTableName . '
+        // Реально таблица никогда тут не будет создаваться, это исключительно для понимания её структуры, можно сказать
+        // скрипт для создания таблицы. Тут структура для оракловой таблицы. Хотя в родительском классе тоже описана.
+        $sql = 'CREATE TABLE ' . $this->sessionTableName . '
            (
-              "ID"     VARCHAR2(32 BYTE),
-              "EXPIRE" NUMBER(10,0) NOT NULL,
-              "DATA" BLOB,
+              id     VARCHAR2(32 BYTE),
+              expire NUMBER(10,0) NOT NULL,
+              data   BLOB,
                CONSTRAINT YiiSession_PK PRIMARY KEY(ID)
            );';
-        $db->createCommand($sql)
-            ->execute();
+        $db->createCommand($sql)->execute();
     }
 
     /**

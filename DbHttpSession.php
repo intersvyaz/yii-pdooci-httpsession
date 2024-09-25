@@ -2,6 +2,7 @@
 
 namespace Intersvyaz\HttpSession;
 
+use CDbExpression;
 use CDbHttpSession;
 use Exception;
 use PDO;
@@ -55,11 +56,11 @@ class DbHttpSession extends CDbHttpSession
      */
     public function regenerateID($deleteOldSession = false)
     {
-        if (!$this->isOci8Driver()) {
-            parent::regenerateID($deleteOldSession);
-            return;
-        }
-
+        // Родительский метод не используем, потому что тут все крайне сложно реализовано.
+        // В родительском методе при регенерации сессии всегда принудительно выставляется false,
+        // а в этой реализации опираемся на то, что выставлено true.
+        // При регенерации сессии надо почистить сначала старую сессию, чтобы стартовать новую без данных от старой.
+        // Потому что в случае авторизации через oauth (passport) эти данные очень сильно мешают.
         $oldId = session_id();
 
         // if no session is started, there is nothing to regenerate
@@ -67,6 +68,9 @@ class DbHttpSession extends CDbHttpSession
             return;
         }
 
+        // Набор параметров такой, что regenerateID обычно вызывается с удалением сессий, в результате чего
+        // вызов session_regenerate_id с параметром удаления предварительно удаляет данную сессию из базы,
+        // соответственно она не находится дальше, и происходит вставка с пустыми значениями.
         if ($this->getIsStarted()) {
             session_regenerate_id($deleteOldSession);
         }
@@ -77,6 +81,8 @@ class DbHttpSession extends CDbHttpSession
         $row = $db->createCommand("SELECT id, expire, data FROM {$this->sessionTableName} WHERE id = :id")
             ->bindValue(':id', $oldId)->queryRow();
 
+        // Тут вообще все очень сложно - происходит несколько редиректов, запросы к паспорту, который выставляет
+        // куки, чтобы это все корректно переехало с оракла на ПГ потребовалось изрядное количество времени.
         if ($row !== false) {
             if ($deleteOldSession) {
                 $db->createCommand("UPDATE {$this->sessionTableName} SET id = :newId WHERE id = :oldId")
@@ -84,36 +90,32 @@ class DbHttpSession extends CDbHttpSession
                     ->bindValue(':oldId', $oldId)
                     ->execute();
             } else {
+                // В реализации для разных баз отличается только вставка, когда нет удаления,
+                // но такого по факту никогда не бывает.
                 if ($this->isOci8Driver()) {
-                    $fp = $row['DATA'];
-                } else {
-                    $fp = fopen('php://memory', "rwb");
-                    fwrite($fp, stream_get_contents($row['DATA']));
-                    fseek($fp, 0);
-                    $transaction = $db->beginTransaction();
-                }
-
-                $db->createCommand(
-                    "INSERT INTO {$this->sessionTableName} (id, expire,data)
+                    $data = $row['DATA'];
+                    $db->createCommand(
+                        "INSERT INTO {$this->sessionTableName} (id, expire, data)
                       VALUES (:id, :expire, empty_blob()) returning data into :data"
-                )
-                    ->bindValue(':id', $newId)
-                    ->bindValue(':expire', $row['EXPIRE'])
-                    ->bindParam(':data', $fp, PDO::PARAM_LOB)
-                    ->execute();
-
-                if (!$this->isOci8Driver()) {
-                    $transaction->commit();
-                    fclose($fp);
+                    )
+                        ->bindValue(':id', $newId)
+                        ->bindValue(':expire', $row['EXPIRE'])
+                        ->bindParam(':data', $data, PDO::PARAM_LOB)
+                        ->execute();
+                } else {
+                    $row['id'] = $newId;
+                    $db->createCommand()->insert($this->sessionTableName, $row);
                 }
             }
         } else {
-            // shouldn't reach here normally
+            // В родительском же классе для данной ветки написано "shouldn't reach here normally",
+            // хотя по факту всегда попадаем именно сюда. Так сделано для того, чтобы не тащить данные от
+            // предыдущих запросов (в ходе авторизации происходит порядка 3 или 4 редиректов).
             $db->createCommand("INSERT INTO {$this->sessionTableName} (id, expire) values (:id, :expire)")
-                ->execute(array(
+                ->execute([
                     'id' => $newId,
                     'expire' => time() + $this->getTimeout(),
-                ));
+                ]);
         }
     }
 
@@ -145,35 +147,55 @@ class DbHttpSession extends CDbHttpSession
      */
     public function writeSession($id, $data)
     {
-        if (!$this->isOci8Driver()) {
-            // Для всех не оракловых баз берем функционал из родительского метода
-            return parent::writeSession($id, $data);
-        }
-
         // exception must be caught in session write handler
         // http://us.php.net/manual/en/function.session-set-save-handler.php
         try {
             $expire = time() + $this->getTimeout();
             $db = $this->getDbConnection();
 
-            // Весь код, который тут был, нормально работает для Оракла, но криво работает для ПГ.
-            // Поэтому делаем его отдельно, а для остальных баз берем из родительского метода.
             $sql = "SELECT id FROM {$this->sessionTableName} WHERE id = :id";
-            if ($db->createCommand($sql)->bindValue(':id', $id)->queryScalar() === false) {
-                $sql = "INSERT INTO {$this->sessionTableName} (id, expire, data)
-                    VALUES (:id, :expire, empty_blob()) returning data into :data";
-            } else {
-                $data = $this->getDataForSave($id, $data);
 
-                $sql = "UPDATE {$this->sessionTableName} SET data = empty_blob(), expire = :expire
-                    WHERE id = :id RETURNING data into :data";
+            $id = $db->createCommand($sql)->bindValue(':id', $id)->queryScalar();
+            if ($id !== false) {
+                $data = $this->getDataForSave($id, $data);
             }
 
-            $db->createCommand($sql)
-                ->bindValue(':id', $id)
-                ->bindValue(':expire', $expire)
-                ->bindParam(':data', $data, PDO::PARAM_LOB)
-                ->execute();
+            if ($this->isOci8Driver()) {
+                // У оракла блобы довольно своеобразно записываются в базу - через параметр,
+                // который возвращается из базы.
+                if ($id === false) {
+                    $sql = "INSERT INTO {$this->sessionTableName} (id, expire, data)
+                    VALUES (:id, :expire, empty_blob()) returning data into :data";
+                } else {
+                    $sql = "UPDATE {$this->sessionTableName} SET data = empty_blob(), expire = :expire
+                    WHERE id = :id RETURNING data into :data";
+                }
+
+                $db->createCommand($sql)
+                    ->bindValue(':id', $id)
+                    ->bindValue(':expire', $expire)
+                    ->bindParam(':data', $data, PDO::PARAM_LOB)
+                    ->execute();
+            } else {
+                if ($db->getDriverName() == 'pgsql') {
+                    $data = new CDbExpression($db->quoteValueWithType($data, PDO::PARAM_LOB) . "::bytea");
+                } elseif (in_array($db->getDriverName(), ['sqlsrv', 'mssql', 'dblib'])) {
+                    $data = new CDbExpression('CONVERT(VARBINARY(MAX), ' . $db->quoteValue($data) . ')');
+                }
+
+                if ($id === false) {
+                    $db->createCommand()->insert($this->sessionTableName, [
+                        'id' => $id,
+                        'data' => $data,
+                        'expire' => $expire,
+                    ]);
+                } else {
+                    $db->createCommand()->update($this->sessionTableName, [
+                        'data' => $data,
+                        'expire' => $expire
+                    ], 'id = :id', [':id' => $id]);
+                }
+            }
 
             if ($this->transaction) {
                 $this->transaction->commit();

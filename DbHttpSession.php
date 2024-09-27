@@ -155,15 +155,15 @@ class DbHttpSession extends CDbHttpSession
 
             $sql = "SELECT id FROM {$this->sessionTableName} WHERE id = :id";
 
-            $id = $db->createCommand($sql)->bindValue(':id', $id)->queryScalar();
-            if ($id !== false) {
+            $dbId = $db->createCommand($sql)->bindValue(':id', $id)->queryScalar();
+            if ($dbId !== false) {
                 $data = $this->getDataForSave($id, $data);
             }
 
             if ($this->isOci8Driver()) {
                 // У оракла блобы довольно своеобразно записываются в базу - через параметр,
                 // который возвращается из базы.
-                if ($id === false) {
+                if ($dbId === false) {
                     $sql = "INSERT INTO {$this->sessionTableName} (id, expire, data)
                     VALUES (:id, :expire, empty_blob()) returning data into :data";
                 } else {
@@ -183,7 +183,7 @@ class DbHttpSession extends CDbHttpSession
                     $data = new CDbExpression('CONVERT(VARBINARY(MAX), ' . $db->quoteValue($data) . ')');
                 }
 
-                if ($id === false) {
+                if ($dbId === false) {
                     $db->createCommand()->insert($this->sessionTableName, [
                         'id' => $id,
                         'data' => $data,
